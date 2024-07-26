@@ -1,0 +1,1593 @@
+---
+title: "Simulación corregionalizados - definitivo"
+author: "Silvia Rasero Gil"
+date: ""
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Simulación NORMAL 
+
+
+```{r, include=FALSE}
+## Carga de librerías ----
+
+library(INLA)
+library(fmesher)
+library(ggplot2)
+library(gridExtra)
+library(viridis)
+library(dplyr)
+library(sf)
+```
+
+
+```{r}
+# Funciones
+
+colsc <- function(...) { # Función para definir la escala de colores de los gráficos 
+  scale_fill_gradientn(
+    colours = turbo(n = 11),
+    limits = range(..., na.rm = TRUE)
+  )
+}
+
+# Función para crear la región de estudio de 50x50
+
+campo <- function(c1,c2,c3,c4) {
+  xy <- expand.grid(
+    seq(c1, c2, length.out = (50)),
+    seq(c3, c4, length.out = (50))
+  )
+  long <- as.numeric(xy[, 1])
+  lat <- as.numeric(xy[, 2])
+  loc_xy <- cbind(long, lat)
+  
+  return(loc_xy)
+}
+```
+
+
+```{r}
+c1 <- 0
+c2 <- 50
+c3<-0
+c4<-50
+
+set.seed(16)
+loc_xy <- campo(c1, c2, c3, c4)
+
+```
+
+
+
+## Simulación de las dos especies con una estructura de corregionalización.
+
+Una vez tenemos el campo en el que vamos a trabajar, lo siguiente para montar la simulación es fijar los valores de los parámetros necesarios: los interceptos de ambas especies Y y Z ($\beta_{0Y}$ y $\beta_{0Z}$) y la precisión de la distribución de los datos para ambas especies ($\tau_{Y}$ y $\tau_{Z}$).
+
+```{r}
+# Distribuciones previas de efectos fijos y precisión de la distribución de los datos
+
+beta01 <- 500  # Intercepto especie1
+beta02 <- 1000 # Intercepto especie2 
+
+prec1 <- (1/4) # Precisión de la distribución de los datos para la especie Z
+prec2 <- (1/4) # Precisión de la distribución de los datos para la especie Y
+
+```
+
+Además, se deben simular los efectos aleatorios espaciales que siguen ambas especies. Se comienza creando una malla (*mesh*) a partir de las localizaciones creadas anteriormente. Además, se definen los parámetros necesarios para crear la espacialidad: valores para el rango del efecto espacial (rho=20) y la desviación estándar de la matriz de covarianzas Matern (para ambas especies; $\sigma_w$=2.236). 
+
+```{r}
+### Simulación de los efectos espaciales ----
+
+# Construimos la malla que utilizaremos para la simulación de los efectos espciales
+mesh2d_sim <- fm_mesh_2d_inla(loc.domain = loc_xy, 
+                              max.edge = c(1, 15)) 
+
+plot(mesh2d_sim)
+
+
+#n muestras simuladas, rho=rango, sigma=sd Matern
+set.seed(16)
+u1_nodes <- fm_matern_sample(x = mesh2d_sim, n = 1, rho = 20, sigma = sqrt(5)) # Efecto espacial nodos especie 1
+u1_nodes <- u1_nodes - mean(u1_nodes) # Media global nula
+u2_nodes <- fm_matern_sample(x = mesh2d_sim, n = 1, rho = 20, sigma = sqrt(5)) # Efecto espacial nodos especie 2
+u2_nodes <- u2_nodes - mean(u2_nodes) # Media global nula
+```
+
+
+```{r}
+### Simulación de localizaciones  para las dos especies ----
+
+xy_sample1 <- matrix(data = runif(n = 5000, min = 0, max = 50),ncol = 2)# Simulamos 2500 localizaciones para la especie1 en el cuadrado (0, 50) X (0, 50)
+xy_sample2 <- matrix(data = runif(n = 5000, min = 0, max = 50), ncol = 2) # Simulamos 2500 localizaciones para la especie2 en el cuadrado (0, 50) X (0, 50)
+
+
+```
+
+
+El mapa conjunto de las localizaciones de ambas especies queda así:
+
+```{r}
+#mapa de las localizaciones de las dos especies juntas:
+ggplot() +
+  geom_point(data = data.frame(xy_sample1), mapping = aes(x=X1, y=X2, color="especie1")) +
+  geom_point(data = data.frame(xy_sample2), mapping = aes(x=X1, y=X2, color="especie2")) + 
+  scale_color_manual(name='Especies', breaks=c('especie1', 'especie2'), 
+                     labels=c("especie1"="Especie 1 (Z)", "especie2"="Especie 2 (Y)"), 
+                     values=c('especie1'='red', 'especie2'='blue')) +
+  theme_bw()
+```
+
+
+- Situaciones para distintos valores de $a$.
+
+Para no trabajar solo con el caso en el que $a$=0.5, se crea un bucle para tener las posibilidades con 10 valores de dicho parámetro de relación en la distribución espacial de la especie 2 respecto con la 1. Así, se prueba con los valores de (-10-1),(-1,0), (0,1) y (1,10). Se almacenan los datos para cada caso y se representan los gráficos pertinentes. 
+
+```{r,comment=F}
+
+# Listas para almacenar los data frames y los gráficos
+data_frames_list <- list() #aquí se almacenan los df de cada caso de a
+plots_list <- list() #aquí se almacenan los plots para cada caso de a (2 gráficos, uno para cada especie, la sp1 (Z) siempre será igual)
+
+A_xy1 <- fm_basis(x = mesh2d_sim, loc = xy_sample1) # Proyección de los nodos a las localizaciones de muestreo xy_sample1
+A_xy2 <- fm_basis(x = mesh2d_sim, loc = xy_sample2) # Proyección de los nodos a las localizaciones de muestreo xy_sample2
+
+for (a in seq(-10, -1, by = 1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes )
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1")
+
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2; a =", a))
+  
+  plots_list[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(-10, -1, by = 1)) {
+  plot1 <- plots_list[[as.character(a)]]$plot1
+  plot2 <- plots_list[[as.character(a)]]$plot2
+}
+```
+
+
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Gráficos combinados
+combined_plot_m10 <- plots_list[["-10"]]$plot1 + plots_list[["-10"]]$plot2
+combined_plot_m9 <- plots_list[["-9"]]$plot1 + plots_list[["-9"]]$plot2
+combined_plot_m8 <- plots_list[["-8"]]$plot1 + plots_list[["-8"]]$plot2
+combined_plot_m7 <- plots_list[["-7"]]$plot1 + plots_list[["-7"]]$plot2
+combined_plot_m6 <- plots_list[["-6"]]$plot1 + plots_list[["-6"]]$plot2
+combined_plot_m5 <- plots_list[["-5"]]$plot1 + plots_list[["-5"]]$plot2
+combined_plot_m4 <- plots_list[["-4"]]$plot1 + plots_list[["-4"]]$plot2
+combined_plot_m3 <- plots_list[["-3"]]$plot1 + plots_list[["-3"]]$plot2
+combined_plot_m2 <- plots_list[["-2"]]$plot1 + plots_list[["-2"]]$plot2
+combined_plot_m1 <- plots_list[["-1"]]$plot1 + plots_list[["-1"]]$plot2
+
+
+```
+
+```{r}
+#Representación
+print(combined_plot_m10)
+print(combined_plot_m9)
+print(combined_plot_m8)
+print(combined_plot_m7)
+print(combined_plot_m6)
+print(combined_plot_m5)
+print(combined_plot_m4)
+print(combined_plot_m3)
+print(combined_plot_m2)
+print(combined_plot_m1)
+```
+
+
+
+
+```{r,comment=F}
+
+
+for (a in seq(-0.9, -0.1, by = 0.1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(-0.9, -0.1, by = 0.1)) {
+  plot1 <- plots_list[[as.character(a)]]$plot1
+  plot2 <- plots_list[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Mostrar los gráficos juntos
+combined_plot_m0.9 <- plots_list[["-0.9"]]$plot1 + plots_list[["-0.9"]]$plot2
+combined_plot_m0.8 <- plots_list[["-0.8"]]$plot1 + plots_list[["-0.8"]]$plot2
+combined_plot_m0.7<- plots_list[["-0.7"]]$plot1 + plots_list[["-0.7"]]$plot2
+combined_plot_m0.6 <- plots_list[["-0.6"]]$plot1 + plots_list[["-0.6"]]$plot2
+combined_plot_m0.5 <- plots_list[["-0.5"]]$plot1 + plots_list[["-0.5"]]$plot2
+combined_plot_m0.4 <- plots_list[["-0.4"]]$plot1 + plots_list[["-0.4"]]$plot2
+combined_plot_m0.3 <- plots_list[["-0.3"]]$plot1 + plots_list[["-0.3"]]$plot2
+combined_plot_m0.2 <- plots_list[["-0.2"]]$plot1 + plots_list[["-0.2"]]$plot2
+combined_plot_m0.1 <- plots_list[["-0.1"]]$plot1 + plots_list[["-0.1"]]$plot2
+```
+
+```{r}
+#Representación
+print(combined_plot_m0.9)
+print(combined_plot_m0.8)
+print(combined_plot_m0.7)
+print(combined_plot_m0.6)
+print(combined_plot_m0.5)
+print(combined_plot_m0.4)
+print(combined_plot_m0.3)
+print(combined_plot_m0.2)
+print(combined_plot_m0.1)
+``` 
+
+
+
+```{r,comment=F}
+
+
+for (a in seq(0, 0.9, by = 0.1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(0, 0.9, by = 0.1)) {
+  plot1 <- plots_list[[as.character(a)]]$plot1
+  plot2 <- plots_list[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Mostrar los gráficos juntos
+combined_plot_0 <- plots_list[["0"]]$plot1 + plots_list[["0"]]$plot2
+combined_plot_0.1 <- plots_list[["0.1"]]$plot1 + plots_list[["0.1"]]$plot2
+combined_plot_0.2<- plots_list[["0.2"]]$plot1 + plots_list[["0.2"]]$plot2
+combined_plot_0.3<- plots_list[["0.3"]]$plot1 + plots_list[["0.3"]]$plot2
+combined_plot_0.4 <- plots_list[["0.4"]]$plot1 + plots_list[["0.4"]]$plot2
+combined_plot_0.5 <- plots_list[["0.5"]]$plot1 + plots_list[["0.5"]]$plot2
+combined_plot_0.6 <- plots_list[["0.6"]]$plot1 + plots_list[["0.6"]]$plot2
+combined_plot_0.7 <- plots_list[["0.7"]]$plot1 + plots_list[["0.7"]]$plot2
+combined_plot_0.8 <- plots_list[["0.8"]]$plot1 + plots_list[["0.8"]]$plot2
+combined_plot_0.9 <- plots_list[["0.9"]]$plot1 + plots_list[["0.9"]]$plot2
+
+```
+
+```{r}
+#Representación
+print(combined_plot_0)
+print(combined_plot_0.1)
+print(combined_plot_0.2)
+print(combined_plot_0.3)
+print(combined_plot_0.4)
+print(combined_plot_0.5)
+print(combined_plot_0.6)
+print(combined_plot_0.7)
+print(combined_plot_0.8)
+print(combined_plot_0.9)
+``` 
+
+
+
+
+
+```{r,comment=F}
+
+
+for (a in seq(1, 10, by = 1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(1, 10, by = 1)) {
+  plot1 <- plots_list[[as.character(a)]]$plot1
+  plot2 <- plots_list[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Mostrar los gráficos juntos
+combined_plot_1 <- plots_list[["1"]]$plot1 + plots_list[["1"]]$plot2
+combined_plot_2 <- plots_list[["2"]]$plot1 + plots_list[["2"]]$plot2
+combined_plot_3 <- plots_list[["3"]]$plot1 + plots_list[["3"]]$plot2
+combined_plot_4 <- plots_list[["4"]]$plot1 + plots_list[["4"]]$plot2
+combined_plot_5 <- plots_list[["5"]]$plot1 + plots_list[["5"]]$plot2
+combined_plot_6 <- plots_list[["6"]]$plot1 + plots_list[["6"]]$plot2
+combined_plot_7 <- plots_list[["7"]]$plot1 + plots_list[["7"]]$plot2
+combined_plot_8 <- plots_list[["8"]]$plot1 + plots_list[["8"]]$plot2
+combined_plot_9 <- plots_list[["9"]]$plot1 + plots_list[["9"]]$plot2
+combined_plot_10 <- plots_list[["10"]]$plot1 + plots_list[["10"]]$plot2
+
+```
+
+```{r}
+#Representación
+print(combined_plot_1)
+print(combined_plot_2)
+print(combined_plot_3)
+print(combined_plot_4)
+print(combined_plot_5)
+print(combined_plot_6)
+print(combined_plot_7)
+print(combined_plot_8)
+print(combined_plot_9)
+print(combined_plot_10)
+``` 
+
+78 casos para cada alfa: 78 modelos en total!
+
+
+
+- Hacemos lo mismo, pero con $\sigma^2_e$=9.
+
+
+```{r}
+# Distribuciones previas de efectos fijos y precisión de la distribución de los datos
+
+prec1_2 <- (1/9) # Precisión de la distribución de los datos para la especie1
+prec2_2 <- (1/9) # Precisión de la distribución de los datos para la especie2
+
+```
+
+
+
+- Situaciones para distintos valores de $a$.
+
+Se crea un bucle para tener las posibilidades con varios valores de dicho parámetro de relación en la distribución espacial de la especie 2 respecto con la 1. Así, se prueba con los valores de (-10-1),(-1,0), (0,1) y (1,10). Se almacenan los datos para cada caso y se representan los gráficos pertinentes. 
+
+```{r,comment=F}
+# Listas para almacenar los data frames y los gráficos
+data_frames_list2 <- list() #aquí se almacenan los df de cada caso de a
+plots_list2 <- list()#aquí se almacenan los plots para cada caso de a (2 gráficos, uno para cada especie, aunque la sp1 siempre será igual)
+
+
+
+
+for (a in seq(-10, -1, by = 1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1_2 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2_2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list2[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list2[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list2$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(-10, -1, by = 1)) {
+  plot1 <- plots_list2[[as.character(a)]]$plot1
+  plot2 <- plots_list2[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Mostrar los gráficos juntos
+combined_plot_m10_2 <- plots_list2[["-10"]]$plot1 + plots_list2[["-10"]]$plot2
+combined_plot_m9_2 <- plots_list2[["-9"]]$plot1 + plots_list2[["-9"]]$plot2
+combined_plot_m8_2 <- plots_list2[["-8"]]$plot1 + plots_list2[["-8"]]$plot2
+combined_plot_m7_2 <- plots_list2[["-7"]]$plot1 + plots_list2[["-7"]]$plot2
+combined_plot_m6_2 <- plots_list2[["-6"]]$plot1 + plots_list2[["-6"]]$plot2
+combined_plot_m5_2 <- plots_list2[["-5"]]$plot1 + plots_list2[["-5"]]$plot2
+combined_plot_m4_2 <- plots_list2[["-4"]]$plot1 + plots_list2[["-4"]]$plot2
+combined_plot_m3_2 <- plots_list2[["-3"]]$plot1 + plots_list2[["-3"]]$plot2
+combined_plot_m2_2 <- plots_list2[["-2"]]$plot1 + plots_list2[["-2"]]$plot2
+combined_plot_m1_2 <- plots_list2[["-1"]]$plot1 + plots_list2[["-1"]]$plot2
+
+
+```
+
+```{r}
+#Representación
+print(combined_plot_m10_2)
+print(combined_plot_m9_2)
+print(combined_plot_m8_2)
+print(combined_plot_m7_2)
+print(combined_plot_m6_2)
+print(combined_plot_m5_2)
+print(combined_plot_m4_2)
+print(combined_plot_m3_2)
+print(combined_plot_m2_2)
+print(combined_plot_m1_2)
+```
+
+```{r,comment=F}
+
+
+for (a in seq(-0.9, -0.1, by = 0.1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1_2 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2_2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list2[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list2[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(-0.9, -0.1, by = 0.1)) {
+  plot1 <- plots_list2[[as.character(a)]]$plot1
+  plot2 <- plots_list2[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Mostrar los gráficos juntos
+combined_plot_m0.9_2 <- plots_list2[["-0.9"]]$plot1 + plots_list2[["-0.9"]]$plot2
+combined_plot_m0.8_2 <- plots_list2[["-0.8"]]$plot1 + plots_list2[["-0.8"]]$plot2
+combined_plot_m0.7_2<- plots_list2[["-0.7"]]$plot1 + plots_list2[["-0.7"]]$plot2
+combined_plot_m0.6_2 <- plots_list2[["-0.6"]]$plot1 + plots_list2[["-0.6"]]$plot2
+combined_plot_m0.5_2 <- plots_list2[["-0.5"]]$plot1 + plots_list2[["-0.5"]]$plot2
+combined_plot_m0.4_2 <- plots_list2[["-0.4"]]$plot1 + plots_list2[["-0.4"]]$plot2
+combined_plot_m0.3_2 <- plots_list2[["-0.3"]]$plot1 + plots_list2[["-0.3"]]$plot2
+combined_plot_m0.2_2 <- plots_list2[["-0.2"]]$plot1 + plots_list2[["-0.2"]]$plot2
+combined_plot_m0.1_2 <- plots_list2[["-0.1"]]$plot1 + plots_list2[["-0.1"]]$plot2
+
+
+
+```
+
+```{r}
+#Representación
+print(combined_plot_m0.9_2)
+print(combined_plot_m0.8_2)
+print(combined_plot_m0.7_2)
+print(combined_plot_m0.6_2)
+print(combined_plot_m0.5_2)
+print(combined_plot_m0.4_2)
+print(combined_plot_m0.3_2)
+print(combined_plot_m0.2_2)
+print(combined_plot_m0.1_2)
+``` 
+
+
+```{r,comment=F}
+
+
+for (a in seq(0, 0.9, by = 0.1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1_2 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2_2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list2[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list2[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list2$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(0, 0.9, by = 0.1)) {
+  plot1 <- plots_list2[[as.character(a)]]$plot1
+  plot2 <- plots_list2[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Gráficos juntos
+combined_plot_0_2 <- plots_list2[["0"]]$plot1 + plots_list2[["0"]]$plot2
+combined_plot_0.1_2 <- plots_list2[["0.1"]]$plot1 + plots_list2[["0.1"]]$plot2
+combined_plot_0.2_2 <- plots_list2[["0.2"]]$plot1 + plots_list2[["0.2"]]$plot2
+combined_plot_0.3_2 <- plots_list2[["0.3"]]$plot1 + plots_list2[["0.3"]]$plot2
+combined_plot_0.4_2 <- plots_list2[["0.4"]]$plot1 + plots_list2[["0.4"]]$plot2
+combined_plot_0.5_2 <- plots_list2[["0.5"]]$plot1 + plots_list2[["0.5"]]$plot2
+combined_plot_0.6_2 <- plots_list2[["0.6"]]$plot1 + plots_list2[["0.6"]]$plot2
+combined_plot_0.7_2 <- plots_list2[["0.7"]]$plot1 + plots_list2[["0.7"]]$plot2
+combined_plot_0.8_2 <- plots_list2[["0.8"]]$plot1 + plots_list2[["0.8"]]$plot2
+combined_plot_0.9_2 <- plots_list2[["0.9"]]$plot1 + plots_list2[["0.9"]]$plot2
+
+```
+
+```{r}
+#Representación
+print(combined_plot_0_2)
+print(combined_plot_0.1_2)
+print(combined_plot_0.2_2)
+print(combined_plot_0.3_2)
+print(combined_plot_0.4_2)
+print(combined_plot_0.5_2)
+print(combined_plot_0.6_2)
+print(combined_plot_0.7_2)
+print(combined_plot_0.8_2)
+print(combined_plot_0.9_2)
+``` 
+
+
+
+```{r,comment=F}
+
+
+for (a in seq(1, 10, by = 1)) {
+  # Calcular linpred con el valor de a actual
+  linpred1 <- beta01 + drop(A_xy1 %*% u1_nodes)
+  linpred2 <- beta02 + drop(A_xy2 %*% u2_nodes) + a * drop(A_xy2 %*% u1_nodes)
+  
+  # Generar datos simulados de acuerdo con la distribución gaussiana
+  set.seed(16)
+  y1 <- rnorm(n = length(linpred1), mean = linpred1, sd = prec1_2 ** (-1/2))
+  y2 <- rnorm(n = length(linpred2), mean = linpred2, sd = prec2_2 ** (-1/2))
+  
+  dfsample1_Gaussian <- st_sf(data.frame(y1 = y1), geometry = st_sfc(lapply(X = 1:nrow(xy_sample1), FUN = function(i) {st_point(x = xy_sample1[i, ])})))
+  dfsample2_Gaussian <- st_sf(data.frame(y2 = y2), geometry = st_sfc(lapply(X = 1:nrow(xy_sample2), FUN = function(i) {st_point(x = xy_sample2[i, ])})))
+  
+  # Almacenar los data frames en la lista
+  data_frames_list2[[as.character(a)]] <- list(dfsample1_Gaussian = dfsample1_Gaussian, dfsample2_Gaussian = dfsample2_Gaussian)
+  
+  # Graficar y almacenar los gráficos en la lista
+  plot1 <- ggplot() + geom_sf(dfsample1_Gaussian, mapping = aes(color = y1)) + scale_color_viridis_c(option = "turbo") + ggtitle("Especie 1 (Z)")
+  plot2 <- ggplot() + geom_sf(dfsample2_Gaussian, mapping = aes(color = y2)) + scale_color_viridis_c(option = "turbo") + ggtitle(paste("Especie 2 (Y); alfa =", a))
+  
+  plots_list2[[as.character(a)]] <- list(plot1 = plot1, plot2 = plot2)
+}
+
+# Por ejemplo, para acceder al data frame correspondiente a a = 0.1, se debe hacer data_frames_list2$"0.1"$dfsample1_Gaussian
+
+# Generar y guardar los gráficos
+for (a in seq(1, 10, by = 1)) {
+  plot1 <- plots_list2[[as.character(a)]]$plot1
+  plot2 <- plots_list2[[as.character(a)]]$plot2
+}
+```
+
+Los gráficos para cada valor de $a$ generados quedan así (distribución Normal):
+
+```{r,include=FALSE}
+library(patchwork)
+# Mostrar los gráficos juntos
+combined_plot_1_2 <- plots_list2[["1"]]$plot1 + plots_list2[["1"]]$plot2 
+combined_plot_2_2 <- plots_list2[["2"]]$plot1 + plots_list2[["2"]]$plot2
+combined_plot_3_2 <- plots_list2[["3"]]$plot1 + plots_list2[["3"]]$plot2
+combined_plot_4_2 <- plots_list2[["4"]]$plot1 + plots_list2[["4"]]$plot2
+combined_plot_5_2 <- plots_list2[["5"]]$plot1 + plots_list2[["5"]]$plot2
+combined_plot_6_2 <- plots_list2[["6"]]$plot1 + plots_list2[["6"]]$plot2
+combined_plot_7_2 <- plots_list2[["7"]]$plot1 + plots_list2[["7"]]$plot2
+combined_plot_8_2 <- plots_list2[["8"]]$plot1 + plots_list2[["8"]]$plot2
+combined_plot_9_2 <- plots_list2[["9"]]$plot1 + plots_list2[["9"]]$plot2
+combined_plot_10_2 <- plots_list2[["10"]]$plot1 + plots_list2[["10"]]$plot2
+
+```
+
+```{r}
+#Representación
+print(combined_plot_1_2)
+print(combined_plot_2_2)
+print(combined_plot_3_2)
+print(combined_plot_4_2)
+print(combined_plot_5_2)
+print(combined_plot_6_2)
+print(combined_plot_7_2)
+print(combined_plot_8_2)
+print(combined_plot_9_2)
+print(combined_plot_10_2)
+``` 
+
+
+
+```{r}
+#guardar los plots combinados
+
+# sigma=9
+plots9 <- list(combined_plot_1_2, combined_plot_2_2, combined_plot_3_2, combined_plot_4_2, combined_plot_5_2, combined_plot_6_2, combined_plot_7_2, combined_plot_8_2, combined_plot_9_2, combined_plot_10_2, combined_plot_m1_2, combined_plot_m2_2, combined_plot_m3_2, combined_plot_m4_2, combined_plot_m5_2, combined_plot_m6_2, combined_plot_m7_2, combined_plot_m8_2, combined_plot_m9_2, combined_plot_m10_2,combined_plot_m0.1_2,combined_plot_m0.2_2,combined_plot_m0.3_2,combined_plot_m0.4_2,combined_plot_m0.5_2,combined_plot_m0.6_2,combined_plot_m0.7_2,combined_plot_m0.8_2,combined_plot_m0.9_2,combined_plot_0_2,combined_plot_0.1_2,combined_plot_0.2_2, combined_plot_0.3_2,combined_plot_0.4_2, combined_plot_0.5_2,combined_plot_0.6_2, combined_plot_0.7_2, combined_plot_0.8_2,combined_plot_0.9_2)
+
+for (i in seq_along(plots9)) {
+  plot <- plots9[[i]] 
+  ggsave(
+    filename =paste0("./sp1vssp2/sigma9/Abundancia_sigma9_", i, ".png"),
+    plot = plot,
+    width = 8, height = 6, dpi = 300
+  )
+}
+
+#sigma=4
+
+plots4 <- list(combined_plot_1, combined_plot_2, combined_plot_3, combined_plot_4, combined_plot_5, combined_plot_6, combined_plot_7, combined_plot_8, combined_plot_9, combined_plot_10, combined_plot_m1, combined_plot_m2, combined_plot_m3, combined_plot_m4, combined_plot_m5, combined_plot_m6, combined_plot_m7, combined_plot_m8, combined_plot_m9, combined_plot_m10,combined_plot_m0.1,combined_plot_m0.2,combined_plot_m0.3,combined_plot_m0.4,combined_plot_m0.5,combined_plot_m0.6,combined_plot_m0.7,combined_plot_m0.8,combined_plot_m0.9,combined_plot_0,combined_plot_0.1,combined_plot_0.2,combined_plot_0.3,combined_plot_0.4,combined_plot_0.5, combined_plot_0.6,combined_plot_0.7,combined_plot_0.8, combined_plot_0.9)
+
+for (i in seq_along(plots4)) {
+  plot <- plots4[[i]] 
+  ggsave(
+    filename =paste0("./sp1vssp2/sigma4/Abundancia_sigma4_", i, ".png"),
+    plot = plot,
+    width = 8, height = 6, dpi = 300
+  )
+}
+
+
+```
+
+
+
+```{r}
+save(data_frames_list,file="./datos_simulados/df_list1.RData")
+save(data_frames_list2,file="./datos_simulados/df_list2.RData")
+```
+
+
+
+
+## MODELOS
+
+Haremos 78 modelos, uno con cada caso de $a$. Primero se hacen las muestras de n=200 para cada especie. 
+
+- Para el primer caso ($\sigma_e^2=4$)
+
+
+```{r}
+# Función para muestrear aleatoriamente   
+
+ind_sampling <- function(df, size, seed.sample){  
+  if(!missing(seed.sample)) set.seed(seed.sample)
+  
+  # Independent and completly random sample 
+  sample <- df[sample(x = 1:nrow(df), size = size),]
+  return(sample)
+}
+
+# a=-10
+
+inf_sample1_m10 <- ind_sampling(data_frames_list$"-10"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m10 <- ind_sampling(data_frames_list$"-10"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+
+# a=-9
+
+inf_sample1_m9 <- ind_sampling(data_frames_list$"-9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m9 <- ind_sampling(data_frames_list$"-9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-8
+
+inf_sample1_m8 <- ind_sampling(data_frames_list$"-8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m8 <- ind_sampling(data_frames_list$"-8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-7
+
+inf_sample1_m7 <- ind_sampling(data_frames_list$"-7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m7 <- ind_sampling(data_frames_list$"-7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-6
+inf_sample1_m6 <- ind_sampling(data_frames_list$"-6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m6 <- ind_sampling(data_frames_list$"-6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-5
+
+inf_sample1_m5 <- ind_sampling(data_frames_list$"-5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m5 <- ind_sampling(data_frames_list$"-5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-4
+
+inf_sample1_m4 <- ind_sampling(data_frames_list$"-4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m4 <- ind_sampling(data_frames_list$"-4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-3
+
+inf_sample1_m3 <- ind_sampling(data_frames_list$"-3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m3 <- ind_sampling(data_frames_list$"-3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-2
+
+inf_sample1_m2 <- ind_sampling(data_frames_list$"-2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m2 <- ind_sampling(data_frames_list$"-2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-1
+
+inf_sample1_m1 <- ind_sampling(data_frames_list$"-1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m1 <- ind_sampling(data_frames_list$"-1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.9
+
+inf_sample1_m0.9 <- ind_sampling(data_frames_list$"-0.9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.9 <- ind_sampling(data_frames_list$"-0.9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.8
+
+inf_sample1_m0.8 <- ind_sampling(data_frames_list$"-0.8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.8 <- ind_sampling(data_frames_list$"-0.8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.7
+
+inf_sample1_m0.7 <- ind_sampling(data_frames_list$"-0.7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.7 <- ind_sampling(data_frames_list$"-0.7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.6
+
+inf_sample1_m0.6 <- ind_sampling(data_frames_list$"-0.6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.6 <- ind_sampling(data_frames_list$"-0.6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.5
+
+inf_sample1_m0.5 <- ind_sampling(data_frames_list$"-0.5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.5 <- ind_sampling(data_frames_list$"-0.5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.4
+
+inf_sample1_m0.4 <- ind_sampling(data_frames_list$"-0.4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.4 <- ind_sampling(data_frames_list$"-0.4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.3
+
+inf_sample1_m0.3 <- ind_sampling(data_frames_list$"-0.3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.3 <- ind_sampling(data_frames_list$"-0.3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.2
+
+inf_sample1_m0.2 <- ind_sampling(data_frames_list$"-0.2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.2<- ind_sampling(data_frames_list$"-0.2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.1
+
+inf_sample1_m0.1 <- ind_sampling(data_frames_list$"-0.1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_m0.1 <- ind_sampling(data_frames_list$"-0.1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0
+
+inf_sample1_0 <- ind_sampling(data_frames_list$"0"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0 <- ind_sampling(data_frames_list$"0"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.1
+
+inf_sample1_0.1 <- ind_sampling(data_frames_list$"0.1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.1 <- ind_sampling(data_frames_list$"0.1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.2
+
+inf_sample1_0.2 <- ind_sampling(data_frames_list$"0.2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.2 <- ind_sampling(data_frames_list$"0.2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.3
+
+inf_sample1_0.3 <- ind_sampling(data_frames_list$"0.3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.3 <- ind_sampling(data_frames_list$"0.3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.4
+
+inf_sample1_0.4 <- ind_sampling(data_frames_list$"0.4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.4 <- ind_sampling(data_frames_list$"0.4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.5
+
+inf_sample1_0.5 <- ind_sampling(data_frames_list$"0.5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.5 <- ind_sampling(data_frames_list$"0.5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.6
+
+inf_sample1_0.6 <- ind_sampling(data_frames_list$"0.6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.6 <- ind_sampling(data_frames_list$"0.6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.7
+
+inf_sample1_0.7 <- ind_sampling(data_frames_list$"0.7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.7 <- ind_sampling(data_frames_list$"0.7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.8
+
+inf_sample1_0.8 <- ind_sampling(data_frames_list$"0.8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.8 <- ind_sampling(data_frames_list$"0.8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.9
+
+inf_sample1_0.9 <- ind_sampling(data_frames_list$"0.9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_0.9 <- ind_sampling(data_frames_list$"0.9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=1
+
+inf_sample1_1 <- ind_sampling(data_frames_list$"1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_1 <- ind_sampling(data_frames_list$"1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=2
+
+inf_sample1_2 <- ind_sampling(data_frames_list$"2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2 <- ind_sampling(data_frames_list$"2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=3
+
+inf_sample1_3 <- ind_sampling(data_frames_list$"3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_3 <- ind_sampling(data_frames_list$"3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=4
+
+inf_sample1_4 <- ind_sampling(data_frames_list$"4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_4 <- ind_sampling(data_frames_list$"4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=5
+
+inf_sample1_5 <- ind_sampling(data_frames_list$"5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_5 <- ind_sampling(data_frames_list$"5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=6
+
+inf_sample1_6 <- ind_sampling(data_frames_list$"6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_6 <- ind_sampling(data_frames_list$"6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=7
+
+inf_sample1_7 <- ind_sampling(data_frames_list$"7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_7 <- ind_sampling(data_frames_list$"7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=8
+
+inf_sample1_8 <- ind_sampling(data_frames_list$"8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_8 <- ind_sampling(data_frames_list$"8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=9
+
+inf_sample1_9 <- ind_sampling(data_frames_list$"9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_9 <- ind_sampling(data_frames_list$"9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=10
+
+inf_sample1_10 <- ind_sampling(data_frames_list$"10"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_10 <- ind_sampling(data_frames_list$"10"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample_list1 <- list("inf_sample1_0"=inf_sample1_0,inf_sample1_0.1=inf_sample1_0.1,inf_sample1_0.2=inf_sample1_0.2,inf_sample1_0.3=inf_sample1_0.3,inf_sample1_0.4=inf_sample1_0.4,inf_sample1_0.5=inf_sample1_0.5,inf_sample1_0.6=inf_sample1_0.6,inf_sample1_0.7=inf_sample1_0.7,inf_sample1_0.8=inf_sample1_0.8,inf_sample1_0.9=inf_sample1_0.9,inf_sample1_1=inf_sample1_1,inf_sample1_2=inf_sample1_2,inf_sample1_3=inf_sample1_3,inf_sample1_4=inf_sample1_4,inf_sample1_5=inf_sample1_5,inf_sample1_6=inf_sample1_6,inf_sample1_7=inf_sample1_7,inf_sample1_8=inf_sample1_8,inf_sample1_9=inf_sample1_9,inf_sample1_10=inf_sample1_10,inf_sample1_m0.1=inf_sample1_m0.1,inf_sample1_m0.2=inf_sample1_m0.2,inf_sample1_m0.3=inf_sample1_m0.3,inf_sample1_m0.4=inf_sample1_m0.4,inf_sample1_m0.5=inf_sample1_m0.5,inf_sample1_m0.6=inf_sample1_m0.6,inf_sample1_m0.7=inf_sample1_m0.7,inf_sample1_m0.8=inf_sample1_m0.8,inf_sample1_m0.9=inf_sample1_m0.9,inf_sample1_m1=inf_sample1_m1,inf_sample1_m2=inf_sample1_m2,inf_sample1_m3=inf_sample1_m3,inf_sample1_m4=inf_sample1_m4,inf_sample1_m5=inf_sample1_m5,inf_sample1_m6=inf_sample1_m6,inf_sample1_m7=inf_sample1_m7,inf_sample1_m8=inf_sample1_m8,inf_sample1_m9=inf_sample1_m9,inf_sample1_m10=inf_sample1_m10)
+                        
+inf_sample_list2 <- list(inf_sample2_0=inf_sample2_0,inf_sample2_0.1=inf_sample2_0.1,inf_sample2_0.2=inf_sample2_0.2,inf_sample2_0.3=inf_sample2_0.3,inf_sample2_0.4=inf_sample2_0.4,inf_sample2_0.5=inf_sample2_0.5,inf_sample2_0.6=inf_sample2_0.6,inf_sample2_0.7=inf_sample2_0.7,inf_sample2_0.8=inf_sample2_0.8,inf_sample2_0.9=inf_sample2_0.9,inf_sample2_1=inf_sample2_1,inf_sample2_2=inf_sample2_2,inf_sample2_3=inf_sample2_3,inf_sample2_4=inf_sample2_4,inf_sample2_5=inf_sample2_5,inf_sample2_6=inf_sample2_6,inf_sample2_7=inf_sample2_7,inf_sample2_8=inf_sample2_8,inf_sample2_9=inf_sample2_9,inf_sample2_10=inf_sample2_10,inf_sample2_m0.1=inf_sample2_m0.1,inf_sample2_m0.2=inf_sample2_m0.2,inf_sample2_m0.3=inf_sample2_m0.3,inf_sample2_m0.4=inf_sample2_m0.4,inf_sample2_m0.5=inf_sample2_m0.5,inf_sample2_m0.6=inf_sample2_m0.6,inf_sample2_m0.7=inf_sample2_m0.7,inf_sample2_m0.8=inf_sample2_m0.8,inf_sample2_m0.9=inf_sample2_m0.9,inf_sample2_m1=inf_sample2_m1,inf_sample2_m2=inf_sample2_m2,inf_sample2_m3=inf_sample2_m3,inf_sample2_m4=inf_sample2_m4,inf_sample2_m5=inf_sample2_m5,inf_sample2_m6=inf_sample2_m6,inf_sample2_m7=inf_sample2_m7,inf_sample2_m8=inf_sample2_m8,inf_sample2_m9=inf_sample2_m9,inf_sample2_m10=inf_sample2_m10)
+                    
+save(inf_sample_list1,file="./inf_muestras_datos_sim/inf_sample_list1.RData")
+save(inf_sample_list2,file="./inf_muestras_datos_sim/inf_sample_list2.RData")
+
+```
+
+
+
+- Para el segundo caso ($\sigma_e^2=9$)
+
+
+```{r}
+# Función para muestrear aleatoriamente   
+
+ind_sampling <- function(df, size, seed.sample){  
+  if(!missing(seed.sample)) set.seed(seed.sample)
+  
+  # Independent and completly random sample from the simulated response variable data.frame
+  sample <- df[sample(x = 1:nrow(df), size = size),]
+  return(sample)
+}
+
+# a=-10
+
+inf_sample1_2_m10 <- ind_sampling(data_frames_list2$"-10"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m10 <- ind_sampling(data_frames_list2$"-10"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+
+# a=-9
+
+inf_sample1_2_m9 <- ind_sampling(data_frames_list2$"-9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m9 <- ind_sampling(data_frames_list2$"-9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-8
+
+inf_sample1_2_m8 <- ind_sampling(data_frames_list2$"-8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m8 <- ind_sampling(data_frames_list2$"-8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-7
+
+inf_sample1_2_m7 <- ind_sampling(data_frames_list2$"-7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m7 <- ind_sampling(data_frames_list2$"-7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-6
+inf_sample1_2_m6 <- ind_sampling(data_frames_list2$"-6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m6 <- ind_sampling(data_frames_list2$"-6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-5
+
+inf_sample1_2_m5 <- ind_sampling(data_frames_list2$"-5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m5 <- ind_sampling(data_frames_list2$"-5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-4
+
+inf_sample1_2_m4 <- ind_sampling(data_frames_list2$"-4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m4 <- ind_sampling(data_frames_list2$"-4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-3
+
+inf_sample1_2_m3 <- ind_sampling(data_frames_list2$"-3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m3 <- ind_sampling(data_frames_list2$"-3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-2
+
+inf_sample1_2_m2 <- ind_sampling(data_frames_list2$"-2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m2 <- ind_sampling(data_frames_list2$"-2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-1
+
+inf_sample1_2_m1 <- ind_sampling(data_frames_list2$"-1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m1 <- ind_sampling(data_frames_list2$"-1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.9
+
+inf_sample1_2_m0.9 <- ind_sampling(data_frames_list2$"-0.9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.9 <- ind_sampling(data_frames_list2$"-0.9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.8
+
+inf_sample1_2_m0.8 <- ind_sampling(data_frames_list2$"-0.8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.8 <- ind_sampling(data_frames_list2$"-0.8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.7
+
+inf_sample1_2_m0.7 <- ind_sampling(data_frames_list2$"-0.7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.7 <- ind_sampling(data_frames_list2$"-0.7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.6
+
+inf_sample1_2_m0.6 <- ind_sampling(data_frames_list2$"-0.6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.6 <- ind_sampling(data_frames_list2$"-0.6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.5
+
+inf_sample1_2_m0.5 <- ind_sampling(data_frames_list2$"-0.5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.5 <- ind_sampling(data_frames_list2$"-0.5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.4
+
+inf_sample1_2_m0.4 <- ind_sampling(data_frames_list2$"-0.4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.4 <- ind_sampling(data_frames_list2$"-0.4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.3
+
+inf_sample1_2_m0.3 <- ind_sampling(data_frames_list2$"-0.3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.3 <- ind_sampling(data_frames_list2$"-0.3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.2
+
+inf_sample1_2_m0.2 <- ind_sampling(data_frames_list2$"-0.2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.2<- ind_sampling(data_frames_list2$"-0.2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=-0.1
+
+inf_sample1_2_m0.1 <- ind_sampling(data_frames_list2$"-0.1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_m0.1 <- ind_sampling(data_frames_list2$"-0.1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0
+
+inf_sample1_2_0 <- ind_sampling(data_frames_list2$"0"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0 <- ind_sampling(data_frames_list2$"0"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.1
+
+inf_sample1_2_0.1 <- ind_sampling(data_frames_list2$"0.1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.1 <- ind_sampling(data_frames_list2$"0.1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.2
+
+inf_sample1_2_0.2 <- ind_sampling(data_frames_list2$"0.2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.2 <- ind_sampling(data_frames_list2$"0.2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.3
+
+inf_sample1_2_0.3 <- ind_sampling(data_frames_list2$"0.3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.3 <- ind_sampling(data_frames_list2$"0.3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.4
+
+inf_sample1_2_0.4 <- ind_sampling(data_frames_list2$"0.4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.4 <- ind_sampling(data_frames_list2$"0.4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.5
+
+inf_sample1_2_0.5 <- ind_sampling(data_frames_list2$"0.5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.5 <- ind_sampling(data_frames_list2$"0.5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.6
+
+inf_sample1_2_0.6 <- ind_sampling(data_frames_list2$"0.6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.6 <- ind_sampling(data_frames_list2$"0.6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.7
+
+inf_sample1_2_0.7 <- ind_sampling(data_frames_list2$"0.7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.7 <- ind_sampling(data_frames_list2$"0.7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.8
+
+inf_sample1_2_0.8 <- ind_sampling(data_frames_list2$"0.8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.8 <- ind_sampling(data_frames_list2$"0.8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=0.9
+
+inf_sample1_2_0.9 <- ind_sampling(data_frames_list2$"0.9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_0.9 <- ind_sampling(data_frames_list2$"0.9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=1
+
+inf_sample1_2_1 <- ind_sampling(data_frames_list2$"1"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_1 <- ind_sampling(data_frames_list2$"1"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=2
+
+inf_sample1_2_2 <- ind_sampling(data_frames_list2$"2"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_2 <- ind_sampling(data_frames_list2$"2"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=3
+
+inf_sample1_2_3 <- ind_sampling(data_frames_list2$"3"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_3 <- ind_sampling(data_frames_list2$"3"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=4
+
+inf_sample1_2_4 <- ind_sampling(data_frames_list2$"4"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_4 <- ind_sampling(data_frames_list2$"4"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=5
+
+inf_sample1_2_5 <- ind_sampling(data_frames_list2$"5"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_5 <- ind_sampling(data_frames_list2$"5"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=6
+
+inf_sample1_2_6 <- ind_sampling(data_frames_list2$"6"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_6 <- ind_sampling(data_frames_list2$"6"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=7
+
+inf_sample1_2_7 <- ind_sampling(data_frames_list2$"7"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_7 <- ind_sampling(data_frames_list2$"7"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=8
+
+inf_sample1_2_8 <- ind_sampling(data_frames_list2$"8"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_8 <- ind_sampling(data_frames_list2$"8"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=9
+
+inf_sample1_2_9 <- ind_sampling(data_frames_list2$"9"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_9 <- ind_sampling(data_frames_list2$"9"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+# a=10
+
+inf_sample1_2_10 <- ind_sampling(data_frames_list2$"10"$dfsample1_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample2_2_10 <- ind_sampling(data_frames_list2$"10"$dfsample2_Gaussian,
+                            size=200,16) #sample de n=200
+inf_sample_list1_2 <- list("inf_sample1_2_0"=inf_sample1_2_0,inf_sample1_2_0.1=inf_sample1_2_0.1,inf_sample1_2_0.2=inf_sample1_2_0.2,inf_sample1_2_0.3=inf_sample1_2_0.3,inf_sample1_2_0.4=inf_sample1_2_0.4,inf_sample1_2_0.5=inf_sample1_2_0.5,inf_sample1_2_0.6=inf_sample1_2_0.6,inf_sample1_2_0.7=inf_sample1_2_0.7,inf_sample1_2_0.8=inf_sample1_2_0.8,inf_sample1_2_0.9=inf_sample1_2_0.9,inf_sample1_2_1=inf_sample1_2_1,inf_sample1_2_2=inf_sample1_2_2,inf_sample1_2_3=inf_sample1_2_3,inf_sample1_2_4=inf_sample1_2_4,inf_sample1_2_5=inf_sample1_2_5,inf_sample1_2_6=inf_sample1_2_6,inf_sample1_2_7=inf_sample1_2_7,inf_sample1_2_8=inf_sample1_2_8,inf_sample1_2_9=inf_sample1_2_9,inf_sample1_2_10=inf_sample1_2_10,inf_sample1_2_m0.1=inf_sample1_2_m0.1,inf_sample1_2_m0.2=inf_sample1_2_m0.2,inf_sample1_2_m0.3=inf_sample1_2_m0.3,inf_sample1_2_m0.4=inf_sample1_2_m0.4,inf_sample1_2_m0.5=inf_sample1_2_m0.5,inf_sample1_2_m0.6=inf_sample1_2_m0.6,inf_sample1_2_m0.7=inf_sample1_2_m0.7,inf_sample1_2_m0.8=inf_sample1_2_m0.8,inf_sample1_2_m0.9=inf_sample1_2_m0.9,inf_sample1_2_m1=inf_sample1_2_m1,inf_sample1_2_m2=inf_sample1_2_m2,inf_sample1_2_m3=inf_sample1_2_m3,inf_sample1_2_m4=inf_sample1_2_m4,inf_sample1_2_m5=inf_sample1_2_m5,inf_sample1_2_m6=inf_sample1_2_m6,inf_sample1_2_m7=inf_sample1_2_m7,inf_sample1_2_m8=inf_sample1_2_m8,inf_sample1_2_m9=inf_sample1_2_m9,inf_sample1_2_m10=inf_sample1_2_m10)
+                        
+inf_sample_list2_2 <- list(inf_sample2_2_0=inf_sample2_2_0,inf_sample2_2_0.1=inf_sample2_2_0.1,inf_sample2_2_0.2=inf_sample2_2_0.2,inf_sample2_2_0.3=inf_sample2_2_0.3,inf_sample2_2_0.4=inf_sample2_2_0.4,inf_sample2_2_0.5=inf_sample2_2_0.5,inf_sample2_2_0.6=inf_sample2_2_0.6,inf_sample2_2_0.7=inf_sample2_2_0.7,inf_sample2_2_0.8=inf_sample2_2_0.8,inf_sample2_2_0.9=inf_sample2_2_0.9,inf_sample2_2_1=inf_sample2_2_1,inf_sample2_2_2=inf_sample2_2_2,inf_sample2_2_3=inf_sample2_2_3,inf_sample2_2_4=inf_sample2_2_4,inf_sample2_2_5=inf_sample2_2_5,inf_sample2_2_6=inf_sample2_2_6,inf_sample2_2_7=inf_sample2_2_7,inf_sample2_2_8=inf_sample2_2_8,inf_sample2_2_9=inf_sample2_2_9,inf_sample2_2_10=inf_sample2_2_10,inf_sample2_2_m0.1=inf_sample2_2_m0.1,inf_sample2_2_m0.2=inf_sample2_m0.2,inf_sample2_2_m0.3=inf_sample2_2_m0.3,inf_sample2_2_m0.4=inf_sample2_2_m0.4,inf_sample2_2_m0.5=inf_sample2_2_m0.5,inf_sample2_2_m0.6=inf_sample2_2_m0.6,inf_sample2_2_m0.7=inf_sample2_2_m0.7,inf_sample2_2_m0.8=inf_sample2_2_m0.8,inf_sample2_2_m0.9=inf_sample2_2_m0.9,inf_sample2_2_m1=inf_sample2_2_m1,inf_sample2_2_m2=inf_sample2_2_m2,inf_sample2_2_m3=inf_sample2_2_m3,inf_sample2_2_m4=inf_sample2_2_m4,inf_sample2_2_m5=inf_sample2_2_m5,inf_sample2_2_m6=inf_sample2_2_m6,inf_sample2_2_m7=inf_sample2_2_m7,inf_sample2_2_m8=inf_sample2_2_m8,inf_sample2_2_m9=inf_sample2_2_m9,inf_sample2_2_m10=inf_sample2_2_m10)
+                        
+                        
+save(inf_sample_list1_2,file="./inf_muestras_datos_sim/inf_sample_list1_2.RData")
+save(inf_sample_list2_2,file="./inf_muestras_datos_sim/inf_sample_list2_2.RData")
+
+```
+
+
+Ahora, una vez tenemos las muestras, debemos hacer un modelo INLA para cada caso de $a$.
+
+
+```{r,eval=FALSE}
+# Crear una lista para almacenar los modelos
+list_models_gaussian <- list()
+
+
+# Función para crear y ajustar el modelo corregionalizado con INLA
+mod <- function(muestra1, muestra2) {
+  # Definir el mesh para el modelo INLA
+  mesh2d_inf <- fm_mesh_2d_inla(loc.domain = matrix(data = c(0,0,50,0,50,50,0,50,0,0), ncol = 2), 
+                                 max.edge = c(4, 15))
+  
+  # Definir el SPDE
+  spde <- inla.spde2.pcmatern(mesh = mesh2d_inf, alpha = 2, prior.range = c(10,0.5), 
+                              prior.sigma = c(2,0.5), constr = TRUE)
+  
+  # Proyección de los nodos
+  Ainf_xy1 <- fm_basis(x = mesh2d_inf, loc = muestra1$geometry)
+  Ainf_xy2 <- fm_basis(x = mesh2d_inf, loc = muestra2$geometry)
+  
+  # Construir los stacks
+  inf_stk1 <- inla.stack(data = list(y = cbind(muestra1$y1 , NA)),
+                         A = list(Ainf_xy1, 1), 
+                         effects = list(
+                           list(sp1 = 1:mesh2d_inf$n),
+                           list(
+                             intercept1 = rep(1, nrow(muestra1))
+                           )
+                         ),
+                         tag = "inf1")
+  
+  inf_stk2 <- inla.stack(data = list(y = cbind(NA, muestra2$y2)),
+                         A = list(Ainf_xy2, 1), 
+                         effects = list(
+                           list(
+                             sp1_copy = 1:mesh2d_inf$n,
+                             sp2 = 1:mesh2d_inf$n
+                           ),
+                           list(
+                             intercept2 = rep(1, nrow(muestra2))
+                           )
+                         ),
+                         tag = "inf2")
+  
+  inf_total <- inla.stack(inf_stk1, inf_stk2) # Unión de los stacks
+  
+  # Fórmula del corregionalizado
+  formula_inla <- y ~ -1 + intercept1 + f(sp1, model = spde) +
+    intercept2 + f(sp2, model = spde) + f(sp1_copy, copy = "sp1", fixed = FALSE)
+  
+  # Ajustar el modelo con INLA
+  modelo <- inla(data = inla.stack.data(stack = inf_total), formula = formula_inla, 
+                 family = c("gaussian", "gaussian"),
+                 control.predictor = list(A = inla.stack.A(stack = inf_total)),
+                 inla.mode = "compact",
+                 verbose = FALSE, control.compute=list(dic= TRUE,waic= TRUE))
+  
+  # Devolver el modelo ajustado
+  return(modelo)
+}
+
+for (i in c(1:39)) {
+    # Obtener las muestras correspondientes
+    muestra1 <- inf_sample_list1[[i]]
+    muestra2 <- inf_sample_list2[[i]]
+    
+    # Crear y ajustar el modelo corregionalizado con INLA para el par de muestras
+    modelo <- mod(muestra1, muestra2)
+    
+    # Almacenar el modelo en la lista de modelos
+    list_models_gaussian[[paste("modelo_gaussian", i, sep = "_")]] <- modelo
+}
+
+# Guardar cada modelo en un archivo RDS separado
+for (i in 1:length(list_models_gaussian)) {
+  saveRDS(list_models_gaussian[[i]], file = paste0("./modelos/modelo_gaussian_", i, ".rds"))
+}
+
+```
+
+
+
+
+
+Se compara la simulación con la predicción del modelo corregionalizado. Se representan los mapas para ambas especies.
+
+```{r}
+
+a_values <- c(seq(0, 0.9, by = 0.1), seq(1, 10, by = 1), -0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,-0.9,-1,-2,-3,-4,-5,-6,-7,-8,-9,-10)
+
+list_models_gaussian <- list()
+for (i in 1:39) {
+  modelos <- readRDS(file = paste0("./modelos/modelo_gaussian_", i, ".rds"))
+  list_models_gaussian[[i]] <- modelos
+}
+
+library(gridExtra)  # Para usar grid.arrange()
+
+# Red de predicción
+xypred <- as.matrix(expand.grid(x = seq(from = 0, to = 50, length.out = 3E2), y = seq(from = 0, to = 50, length.out = 3E2)))
+
+# Bucle para generar gráficos para cada modelo
+for (i in 1:39) {
+  a <- a_values[i]
+    Aspsim_pred <- fm_basis(x = mesh2d_sim, loc = xypred)
+    Aspinf_pred <- fm_basis(x = mesh2d_inf, loc = xypred) 
+    sp1sim_pred <- drop(Aspsim_pred %*% u1_nodes)
+    sp1inf_pred <- drop(Aspinf_pred %*% list_models_gaussian[[i]]$summary.random$sp1$mean)
+    sp2sim_pred <- drop(Aspsim_pred %*% u2_nodes) + a * drop(Aspsim_pred %*% u1_nodes)
+    sp2inf_pred <- drop(Aspinf_pred %*% list_models_gaussian[[i]]$summary.random$sp2$mean)
+  
+  
+  # Calcular límites para la escala de color
+  limite_sim1 <- colsc(sp1sim_pred)
+  limite_sim2 <- colsc(sp2sim_pred)
+  limite_inf1 <- colsc(sp1inf_pred)
+  limite_inf2 <- colsc(sp2inf_pred)
+  
+  # Crear gráficos para sp1
+  ggsp1_sim <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp1sim_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_sim1 + theme_minimal() + labs(title = paste("Simulación w_Z - Modelo", i))
+  ggsp1_inf <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp1inf_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_inf1 + theme_minimal() + labs(title = paste("Predicción w_Z - Modelo", i))
+  
+  # Crear gráficos para sp2
+  ggsp2_sim <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp2sim_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_sim2 + theme_minimal() + labs(title = paste("Simulación w_Y - Modelo", i))
+  ggsp2_inf <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp2inf_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_inf2 + theme_minimal() + labs(title = paste("Predicción w_Y - Modelo", i))
+  
+  
+  # Organizar gráficos en una cuadrícula y mostrar
+ grid_plot <- grid.arrange(arrangeGrob(grobs = list(ggsp1_sim, ggsp1_inf), ncol = 2),
+               arrangeGrob(grobs = list(ggsp2_sim, ggsp2_inf), ncol = 2))
+
+
+# Guardar la cuadrícula de gráficos como una imagen PNG
+  file_name <- paste0("./graficos/model_", i, "_plots.jpg")
+  ggsave(file_name, grid_plot, width = 10, height = 10)
+}
+
+```
+
+
+
+
+- En el caso de $\sigma^2_e$=9:
+
+A partir de las muestras de n=200 para cada caso de $a$ y especie, se realiza la batería de modelos corregionalizados INLA, igual que anteriormente.
+
+```{r,eval=FALSE}
+# Crear una lista para almacenar los modelos
+list_models_gaussian_2 <- list()
+
+
+# Función para crear y ajustar el modelo corregionalizado con INLA
+mod <- function(muestra1, muestra2) {
+  # Definir el mesh para el modelo INLA
+  mesh2d_inf <- fm_mesh_2d_inla(loc.domain = matrix(data = c(0,0,50,0,50,50,0,50,0,0), ncol = 2), 
+                                 max.edge = c(4, 15))
+  
+  # Definir el SPDE
+  spde <- inla.spde2.pcmatern(mesh = mesh2d_inf, alpha = 2, prior.range = c(10,0.5), 
+                              prior.sigma = c(2,0.5), constr = TRUE)
+  
+  # Proyección de los nodos
+  Ainf_xy1 <- fm_basis(x = mesh2d_inf, loc = muestra1$geometry)
+  Ainf_xy2 <- fm_basis(x = mesh2d_inf, loc = muestra2$geometry)
+  
+  # Construir los stacks
+  inf_stk1 <- inla.stack(data = list(y = cbind(muestra1$y1 , NA)),
+                         A = list(Ainf_xy1, 1), 
+                         effects = list(
+                           list(sp1 = 1:mesh2d_inf$n),
+                           list(
+                             intercept1 = rep(1, nrow(muestra1))
+                           )
+                         ),
+                         tag = "inf1")
+  
+  inf_stk2 <- inla.stack(data = list(y = cbind(NA, muestra2$y2)),
+                         A = list(Ainf_xy2, 1), 
+                         effects = list(
+                           list(
+                             sp1_copy = 1:mesh2d_inf$n,
+                             sp2 = 1:mesh2d_inf$n
+                           ),
+                           list(
+                             intercept2 = rep(1, nrow(muestra2))
+                           )
+                         ),
+                         tag = "inf2")
+  
+  inf_total <- inla.stack(inf_stk1, inf_stk2) # Unión de los stacks
+  
+  # Fórmula del corregionalizado
+  formula_inla <- y ~ -1 + intercept1 + f(sp1, model = spde) +
+    intercept2 + f(sp2, model = spde) + f(sp1_copy, copy = "sp1", fixed = FALSE)
+  
+  # Ajustar el modelo con INLA
+  modelo <- inla(data = inla.stack.data(stack = inf_total), formula = formula_inla, 
+                 family = c("gaussian", "gaussian"),
+                 control.predictor = list(A = inla.stack.A(stack = inf_total)),
+                 inla.mode = "compact",
+                 verbose = FALSE, control.compute=list(dic= TRUE,waic= TRUE))
+  
+  # Devolver el modelo ajustado
+  return(modelo)
+}
+
+# Bucle anidado para recorrer todas las combinaciones de muestras
+for (i in c(1:39)) {
+    # Obtener las muestras correspondientes
+    muestra1 <- inf_sample_list1_2[[i]]
+    muestra2 <- inf_sample_list2_2[[i]]
+    
+    # Crear y ajustar el modelo corregionalizado con INLA para el par de muestras
+    modelo <- mod(muestra1, muestra2)
+    
+    # Almacenar el modelo en la lista de modelos
+    list_models_gaussian_2[[paste("modelo_gaussian_2", i, sep = "_")]] <- modelo
+}
+
+# Guardar cada modelo en un archivo RDS separado
+for (i in 1:length(list_models_gaussian_2)) {
+  saveRDS(list_models_gaussian_2[[i]], file = paste0("./modelos/modelo_gaussian_2_", i, ".rds"))
+}
+
+```
+
+
+
+
+
+```{r}
+
+
+list_models_gaussian_2 <- list()
+for (i in 1:39) {
+  modelos2 <- readRDS(file = paste0("./modelos/modelo_gaussian_2_", i, ".rds"))
+  list_models_gaussian_2[[i]] <- modelos2
+}
+
+
+library(gridExtra)  # Para usar grid.arrange()
+
+# Red de predicción
+xypred <- as.matrix(expand.grid(x = seq(from = 0, to = 50, length.out = 3E2), y = seq(from = 0, to = 50, length.out = 3E2)))
+
+# Bucle para generar gráficos para cada modelo
+for (i in 1:39) {
+  a <- a_values[i]
+  
+  # Obtener predicciones para el modelo actual
+  Aspsim_pred <- fm_basis(x = mesh2d_sim, loc = xypred)
+  Aspinf_pred <- fm_basis(x = mesh2d_inf, loc = xypred) 
+  sp1sim_pred <- drop(Aspsim_pred %*% u1_nodes)
+  sp1inf_pred <- drop(Aspinf_pred %*% list_models_gaussian[[i]]$summary.random$sp1$mean)
+  sp2sim_pred <- drop(Aspsim_pred %*% u2_nodes) + a * drop(Aspsim_pred %*% u1_nodes)
+  sp2inf_pred <- drop(Aspinf_pred %*% list_models_gaussian[[i]]$summary.random$sp2$mean)
+  
+
+  limite_sim1 <- colsc(sp1sim_pred)
+  limite_sim2 <- colsc(sp2sim_pred)
+  limite_inf1 <- colsc(sp1inf_pred)
+  limite_inf2 <- colsc(sp2inf_pred)
+
+  
+  # Crear gráficos para sp1
+  ggsp1_sim <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp1sim_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_sim1 + theme_minimal() + labs(title = paste("Simulación w_Z - Modelo", i))
+  ggsp1_inf <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp1inf_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_inf1 + theme_minimal() + labs(title = paste("Predicción w_Y - Modelo", i))
+  
+  # Crear gráficos para sp2
+  ggsp2_sim <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp2sim_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_sim2 + theme_minimal() + labs(title = paste("Simulación w_Y - Modelo", i))
+  ggsp2_inf <- ggplot() + geom_tile(data = data.frame(xypred, sp = sp2inf_pred), mapping = aes(x=x, y=y, fill=sp)) + limite_inf2 + theme_minimal() + labs(title = paste("Predicción w_Y - Modelo", i))
+  
+  # Organizar gráficos en una cuadrícula y mostrar
+grid_plot <- grid.arrange(arrangeGrob(grobs = list(ggsp1_sim, ggsp1_inf), ncol = 2),
+               arrangeGrob(grobs = list(ggsp2_sim, ggsp2_inf), ncol = 2))
+
+
+# Guardar la cuadrícula de gráficos como una imagen PNG
+  file_name <- paste0("./graficos/model_2_", i, "_plots.jpg")
+  ggsave(file_name, grid_plot, width = 10, height = 10)
+  }
+
+
+```
+
+
+
+
+
+```{r}
+# Ejemplo de representación de muestreo del caso sigma^2=4 para alfa=1
+plotz1 <- ggplot() +
+  geom_sf(data = inf_sample_list1$inf_sample1_1, mapping = aes(color = y1)) +
+  scale_color_viridis_c(option = "turbo") +
+  ggtitle("Especie 1 (Z)")
+
+ggsave(filename = "./graficos/muestraz1.jpg", plot = plotz1, width = 8, height = 6, dpi = 300)
+
+
+ploty1 <- ggplot() +
+  geom_sf(data = inf_sample_list2$inf_sample2_0.6, mapping = aes(color = y2)) +
+  scale_color_viridis_c(option = "turbo") +
+  ggtitle("Especie 2 (Y); alfa =1")
+
+ggsave(filename = "./graficos/muestray1.jpg", plot = ploty1, width = 8, height = 6, dpi = 300)
+```
+
+
+
+
+
+
+
+
